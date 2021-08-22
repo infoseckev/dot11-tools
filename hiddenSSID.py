@@ -6,6 +6,7 @@ from MacLookup import *
 from rich.live import Live
 from rich.table import Table
 from rich.console import Console
+from rich.layout import Layout
 import pandas
 import time
 import csv
@@ -24,22 +25,9 @@ console = Console()
 table_APs = Table(show_header=True, header_style='bold #2070b2',
               title='[bold]ACTIVE Access Points')
 
-table_APs.add_column('MAC', justify='right')
-table_APs.add_column('SSID', justify='right')
-table_APs.add_column('dBm')
-table_APs.add_column('Channel', justify='center')
-table_APs.add_column('Encryption', justify='center')
-table_APs.add_column('Vendor')
 
 clients_list = Table(show_header=True, header_style='bold #2070b2',
               title='[bold]ACTIVE Clients')
-
-clients_list.add_column('MAC', justify='right')
-clients_list.add_column('SSID', justify='right')
-clients_list.add_column('dBm')
-clients_list.add_column('Channel', justify='center')
-clients_list.add_column('Encryption', justify='center')
-clients_list.add_column('Vendor')
 
 OUIMEM = {}
 hidden_AP_list = []
@@ -200,15 +188,52 @@ def parseSSID(pkt):
         # print("Client found for SSID: " + str(pkt.info.decode()) + " MAC vendor: " + str(find_mac_vendor(bssid)) + " MAC address: " + str(bssid))
         # print("Client MAC vendor: " + str(find_mac_vendor(pkt.addr1)) + " and MAC address: " + str(pkt.addr1))
 
+def make_layout() -> Layout:
+    """Define the layout."""
+    layout = Layout(name="root")
+
+    layout.split(
+        Layout(name="header"),
+        Layout(name="footer")
+    )
+
+    return layout
+
+def make_top_grid() :
+    
+    table_APs.add_column('MAC', justify='right')
+    table_APs.add_column('SSID', justify='right')
+    table_APs.add_column('dBm')
+    table_APs.add_column('Channel', justify='center')
+    table_APs.add_column('Encryption', justify='center')
+    table_APs.add_column('Vendor')
+
+    return table_APs
+
+def make_bottom_grid() :
+    
+    clients_list.add_column('MAC', justify='right')
+    clients_list.add_column('SSID', justify='right')
+    clients_list.add_column('dBm')
+    clients_list.add_column('Channel', justify='center')
+    clients_list.add_column('Encryption', justify='center')
+    clients_list.add_column('Vendor')
+
+    return clients_list
+
 def tmp2():
     
     return table_APs
 
 def create_output_process():
     
-    with Live(console=console, screen=True, auto_refresh=False) as live:
+    layout = make_layout()
+    layout["header"].update(make_top_grid())
+    layout["footer"].update(make_bottom_grid())
+
+    with Live(layout, refresh_per_second=10, screen=True) as live:
         while True:
-            live.update(tmp2(), refresh=True)
+            
             time.sleep(1)
 
 if __name__ == "__main__":
