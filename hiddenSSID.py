@@ -83,9 +83,7 @@ def find_mac_vendor2(mac_addr):
     tmpres = mac_addr.upper().split(":")
     mac_str = tmpres[0] + "-" + tmpres[1] + "-" + tmpres[2]
     vendor =  (d.get(mac_str))
-    print(vendor)
     return str(vendor).strip()
-
 
 def get_channel(freq):
     
@@ -136,7 +134,6 @@ def parseSSID(pkt):
             chan = str(stats.get("channel"))
             crypto = str(stats.get("crypto"))
             
-
             #SSID is not visible
             if len(ssid) == 0 :
 
