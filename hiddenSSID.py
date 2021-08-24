@@ -1,6 +1,5 @@
 from scapy.all import Dot11Beacon, Dot11ProbeResp, Dot11Deauth, Dot11ProbeReq, sniff, RadioTap
 from threading import Thread
-from MacLookup import *
 from rich.live import Live
 from rich.table import Table
 from rich.console import Console
@@ -9,6 +8,9 @@ import time
 import os
 import sys
 import argparse
+import string
+import csv
+from datetime import datetime
 
 console = Console()
 
@@ -32,6 +34,14 @@ visibleAPs = []
 deauth_packet_list = []
 
 interface_name = ""
+
+d = {}
+
+with open('output.txt') as lookup:
+    for line in lookup:
+       (key, val) = line.split('\t')
+       d[str(key)] = str(val)
+
 
 def signal_handler(signal, frame):
     print('\n=================')
@@ -70,16 +80,12 @@ def channel_hop():
         time.sleep(0.5)
 
 def find_mac_vendor2(mac_addr):
-    loop = asyncio.get_event_loop()
-    vendor = ""
-    try:
-        vendor = (loop.run_until_complete(AsyncMacLookup().lookup(mac_addr)))
-    except KeyError:
-        return ""
-    except InvalidMacError as e:
-        return ""
+    tmpres = mac_addr.upper().split(":")
+    mac_str = tmpres[0] + "-" + tmpres[1] + "-" + tmpres[2]
+    vendor =  (d.get(mac_str))
+    print(vendor)
+    return str(vendor).strip()
 
-    return vendor
 
 def get_channel(freq):
     
@@ -118,38 +124,38 @@ def parseSSID(pkt):
 
     #Sniff Access Points
     if pkt.haslayer(Dot11Beacon):
+        if pkt.type == 0 and pkt.subtype == 8 :
+            bssid = str(pkt.addr2).strip()
 
-        bssid = str(pkt.addr2)
+            ssid = pkt.info.decode('ascii').strip().strip('\x00')
+            try:
+                dbm_signal = str(pkt.dBm_AntSignal)
+            except:
+                dbm_signal = "N/A"
+            stats = pkt[Dot11Beacon].network_stats()
+            chan = str(stats.get("channel"))
+            crypto = str(stats.get("crypto"))
+            
 
-        ssid = pkt.info.decode()
-        try:
-            dbm_signal = str(pkt.dBm_AntSignal)
-        except:
-            dbm_signal = "N/A"
-        stats = pkt[Dot11Beacon].network_stats()
-        chan = str(stats.get("channel"))
-        crypto = str(stats.get("crypto"))
-        
-        #Hidden SSID for AP
-        #TODO: some blank ones still made it to the list
-        if not ssid:
+            #SSID is not visible
+            if len(ssid) == 0 :
 
-            #if 1st time we see this hidden SSID
-            if  (bssid.strip()) not in hidden_AP_list:
-                
-                #add to our seen list
-                hidden_AP_list.append(bssid)
-                vendor = find_mac_vendor2(pkt.addr2)
-                table_hidden_ssid.add_row(bssid, ssid, dbm_signal, chan, crypto, vendor)
+                #if 1st time we see this hidden SSID
+                if  (bssid) not in hidden_AP_list:
+                    
+                    #add to our seen list
+                    hidden_AP_list.append(bssid)
+                    vendor = find_mac_vendor2(pkt.addr2)
+                    table_hidden_ssid.add_row(bssid, ssid, dbm_signal, chan, crypto, vendor)
+            #SSID is visible
+            else:
 
-        else:
-
-            #if 1st time we see this non-hidden SSID
-            if (bssid) not in visible_AP_list:
-                visible_AP_list.append(bssid)
-
-                vendor = str(find_mac_vendor2(bssid))
-                table_APs.add_row(bssid, ssid, dbm_signal, chan, crypto, vendor)
+                #if 1st time we see this non-hidden SSID
+                if (bssid) not in visible_AP_list:
+                    visible_AP_list.append(bssid)
+                    #print("ssid : " + ssid +  " : " + str(len(str(ssid))))
+                    vendor = str(find_mac_vendor2(bssid))
+                    table_APs.add_row(bssid, ssid, dbm_signal, chan, crypto, vendor)
                 
     #Sniff Probes sent from AP (AP may be 'hidden' )
     elif pkt.haslayer(Dot11ProbeResp):
@@ -174,7 +180,7 @@ def parseSSID(pkt):
         elif (pkt.addr1 not in clientMACs):
             client_mac = pkt.addr1
             clientMACs.append(client_mac)
-            ssid = pkt.info.decode()
+            ssid = pkt.info.decode("ascii", errors="ignore")
             chan = get_channel(pkt[RadioTap].ChannelFrequency)
             
             try:
@@ -199,25 +205,31 @@ def parseSSID(pkt):
         if pkt.type == 0 and pkt.subtype == 4:
 
             mac = str(pkt.addr2)
-            ssid = pkt.info.decode()
-            timestamp = pkt.getlayer(RadioTap).time
-            dt = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-            rssi = str(pkt[RadioTap].dBm_AntSignal)
-            #dbm_signal = pkt.dBm_AntSignal
-            chan = get_channel(pkt[RadioTap].ChannelFrequency)
+            try:
+                ssid = pkt.info.decode("UTF-8", errors="strict")
+            except UnicodeError:
+                pass
             
-            #block blank ssid and add your home ap name in list to filter it
-            if not (ssid == ""):
-                if (pkt.addr2 not in clientMACs):
-                    #to only show once in UI table
-                    clientMACs.append(mac)
+            else:
+                #block blank ssid and add your home ap name in list to filter it
+                if not (ssid == ""):
+                    # print(ssid)
 
-                    vendor = str(find_mac_vendor2(mac))
+                    timestamp = pkt.getlayer(RadioTap).time
+                    dt = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+                    rssi = str(pkt[RadioTap].dBm_AntSignal)
+                    #dbm_signal = pkt.dBm_AntSignal
+                    chan = get_channel(pkt[RadioTap].ChannelFrequency)
+                    if (pkt.addr2 not in clientMACs):
+                        #to only show once in UI table
+                        clientMACs.append(mac)
 
-                    #info = {"timestamp": dt, "mac": mac, "ssid": ssid, "signal_strength": rssi, "channel": chanfreq, "location": "home"}
-                    #print("%s Access Point MAC: %s MADE BY: %s - SSID: %s %s dBm, frequency : %s" % (dt, vendor, mac, ssid, rssi, chanfreq))
+                        vendor = str(find_mac_vendor2(mac))
 
-                    table_clients_list.add_row(str(mac), str(ssid), str(rssi), str(chan), "N/A", probe_type, str(vendor))
+                        #info = {"timestamp": dt, "mac": mac, "ssid": ssid, "signal_strength": rssi, "channel": chanfreq, "location": "home"}
+                        #print("%s Access Point MAC: %s MADE BY: %s - SSID: %s %s dBm, frequency : %s" % (dt, vendor, mac, ssid, rssi, chanfreq))
+
+                        table_clients_list.add_row(str(mac), str(ssid), str(rssi), str(chan), "N/A", probe_type, str(vendor))
         
 def make_layout() -> Layout:
     """Define the layout."""
@@ -225,40 +237,49 @@ def make_layout() -> Layout:
 
     layout.split(
         Layout(name="header"),
-        Layout(name="middle", ratio=1, minimum_size=10),
         Layout(name="footer")
     )
-    layout["footer"].split_row(
-        Layout(name="left", ratio=2, minimum_size=60),
-        Layout(name="right")
+    layout["header"].ratio = 2
+    layout["header"].split_row(
+        Layout(name="top-left"),
+        Layout(name="top-right")
     )
+
+    layout["footer"].split_row(
+        Layout(name="bottom-left"),
+        Layout(name="bottom-right")
+    )
+    # layout["bottom-left"].split_row(
+    #     Layout(name="left-left"),
+    #     Layout(name="left-right")
+    # )
 
     return layout
 
-def make_top_grid() :
+def make_AP_grid() :
     
     table_APs.add_column('MAC', justify='right')
     table_APs.add_column('SSID', justify='right')
     table_APs.add_column('dBm')
-    table_APs.add_column('Channel', justify='center')
-    table_APs.add_column('Encryption', justify='center')
-    table_APs.add_column('Vendor')
+    table_APs.add_column('Ch.', max_width=3, no_wrap=True, justify='center')
+    table_APs.add_column('Encryption', justify='center', max_width=13, no_wrap=True)
+    table_APs.add_column('Vendor', max_width=15, no_wrap=True)
 
     return table_APs
 
-def make_middle_grid() :
+def make_clients_grid() :
     
-    table_clients_list.add_column('MAC', justify='right')
+    table_clients_list.add_column('MAC', justify='right', max_width=18, no_wrap=True)
     table_clients_list.add_column('SSID', justify='right')
     table_clients_list.add_column('dBm')
-    table_clients_list.add_column('Channel', justify='center')
-    table_clients_list.add_column('Encryption', justify='center')
-    table_clients_list.add_column('Probe Type')
-    table_clients_list.add_column('Vendor')
+    table_clients_list.add_column('Ch.', max_width=3, no_wrap=True, justify='center')
+    table_clients_list.add_column('Encryption', justify='center', max_width=15, no_wrap=True)
+    table_clients_list.add_column('Probe Type', max_width=5, no_wrap=True)
+    table_clients_list.add_column('Vendor', max_width=17, no_wrap=True)
     
     return table_clients_list
 
-def make_bottom_right_grid() :
+def make_deauth_grid() :
     
     table_deauth_packets.add_column('Target MAC', justify='right')
     table_deauth_packets.add_column('Culprit AP', justify='right')
@@ -270,23 +291,23 @@ def make_bottom_right_grid() :
 
     return table_deauth_packets
 
-def make_bottom_left_grid() :
-    
+def make_hidden_SSID_grid() :
     table_hidden_ssid.add_column('MAC', justify='right')
     table_hidden_ssid.add_column('SSID', justify='right')
     table_hidden_ssid.add_column('dBm')
-    table_hidden_ssid.add_column('Channel', justify='center')
-    table_hidden_ssid.add_column('Vendor')
+    table_hidden_ssid.add_column('Ch.', max_width=3, justify='center')
+    table_hidden_ssid.add_column('Encryption', justify='center', max_width=15, no_wrap=True)
+    table_hidden_ssid.add_column('Vendor', max_width=20, no_wrap=True)
 
     return table_hidden_ssid
 
 def create_output_process():
     
     layout = make_layout()
-    layout["header"].update(make_top_grid())
-    layout["middle"].update(make_middle_grid())
-    layout["left"].update(make_bottom_left_grid())
-    layout["right"].update(make_bottom_right_grid())
+    layout["top-left"].update(make_AP_grid())
+    layout["top-right"].update(make_clients_grid())
+    layout["bottom-left"].update(make_hidden_SSID_grid())
+    layout["bottom-right"].update(make_deauth_grid())
 
     with Live(layout, refresh_per_second=10, screen=True) as live:
         while True:
