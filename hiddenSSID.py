@@ -1,9 +1,11 @@
-from scapy.all import Dot11Beacon, Dot11ProbeResp, Dot11Deauth, Dot11ProbeReq, sniff, RadioTap
+from rich import table
+from scapy.all import Dot11Beacon, Dot11ProbeResp, Dot11Deauth, Dot11ProbeReq, sniff, RadioTap, Dot11
 from threading import Thread
 from rich.live import Live
-from rich.table import Table
+from rich.table import Row, Table
 from rich.console import Console
 from rich.layout import Layout
+from rich.panel import Panel
 import time
 import os
 import sys
@@ -11,20 +13,10 @@ import argparse
 import string
 import csv
 from datetime import datetime
+import pprint
+from tabulate import tabulate
 
 console = Console()
-
-table_APs = Table(show_header=True, header_style='bold #2070b2',
-              title='[bold]ACTIVE Access Points')
-
-table_clients_list = Table(show_header=True, header_style='bold #2070b2',
-              title='[bold]ACTIVE Clients')
-
-table_hidden_ssid = Table(show_header=True, header_style='bold #2070b2',
-              title='[bold]Hidden APs')
-
-table_deauth_packets = Table(show_header=True, header_style='bold #2070b2',
-              title='[bold]Deauth packets')
 
 hidden_AP_list = []
 visible_AP_list = []
@@ -32,11 +24,9 @@ clientMACs = []
 listOfClients = []
 visibleAPs = []
 deauth_packet_list = []
-
 interface_name = ""
 
 d = {}
-
 with open('output.txt') as lookup:
     for line in lookup:
        (key, val) = line.split('\t')
@@ -117,135 +107,159 @@ def get_channel(freq):
         return '14'
     else:
         return ''
-                    
-def parseSSID(pkt):
 
+def truncate_string(leng, str):
+    if str is None:
+        str = ""
+
+    return (str[:leng] + '..') if len(str) > leng else str
+
+def get_dbm_signal(pkt):
+    dbm_signal = ""
+    try:
+        dbm_signal = pkt.dBm_AntSignal
+    except:
+        dbm_signal = "N/A"
+    return str(dbm_signal)
+
+def sniff_APs(pkt):
     #Sniff Access Points
     if pkt.haslayer(Dot11Beacon):
         if pkt.type == 0 and pkt.subtype == 8 :
-            bssid = str(pkt.addr2).strip()
-
+            addr2 = str(pkt.addr2).strip()
+            #Chipset hack
             ssid = pkt.info.decode('ascii').strip().strip('\x00')
-            try:
-                dbm_signal = str(pkt.dBm_AntSignal)
-            except:
-                dbm_signal = "N/A"
+            dbm_signal = get_dbm_signal(pkt)
             stats = pkt[Dot11Beacon].network_stats()
             chan = str(stats.get("channel"))
-            crypto = str(stats.get("crypto"))
+            enc = str(stats.get("crypto"))
             
-            #SSID is not visible
-            if len(ssid) == 0 :
-
-                #if 1st time we see this hidden SSID
-                if  (bssid) not in hidden_AP_list:
+            # #SSID is not visible
+            if len(ssid) > 0 :
+            #     if  (bssid) not in hidden_AP_list:
                     
-                    #add to our seen list
-                    hidden_AP_list.append(bssid)
-                    vendor = find_mac_vendor2(pkt.addr2)
-                    table_hidden_ssid.add_row(bssid, ssid, dbm_signal, chan, crypto, vendor)
-            #SSID is visible
-            else:
+            #         #add to our seen list
+            #         # hidden_AP_list.append(bssid)
+            #         # vendor = find_mac_vendor2(pkt.addr2)
+            #         # table_hidden_ssid.add_row(bssid, ssid, dbm_signal, chan, enc, vendor)
+            #         pass
+            # else:
+                if (addr2) not in visible_AP_list:
+                    visible_AP_list.append(addr2)
+                    vendor =  str(find_mac_vendor2(addr2))
+                    build_AP_table(addr2, ssid, dbm_signal, chan, enc, vendor)
 
-                #if 1st time we see this non-hidden SSID
-                if (bssid) not in visible_AP_list:
-                    visible_AP_list.append(bssid)
-                    #print("ssid : " + ssid +  " : " + str(len(str(ssid))))
-                    vendor = str(find_mac_vendor2(bssid))
-                    table_APs.add_row(bssid, ssid, dbm_signal, chan, crypto, vendor)
-                
-    #Sniff Probes sent from AP (AP may be 'hidden' )
-    elif pkt.haslayer(Dot11ProbeResp):
+def sniff_Probes(pkt):    
+    addr2 = str(pkt.addr2).strip()
+    addr1 = str(pkt.addr1).strip()   
+    addr3 = str(pkt.addr3).strip()
+    chan = str(get_channel(pkt[RadioTap].ChannelFrequency))
+    dbm_signal = get_dbm_signal(pkt)
 
-        #An AP is leaking a SSID in a Probe Response
+    if pkt.haslayer(Dot11ProbeResp):
+
+        ssid = pkt.info.decode('ascii').strip().strip('\x00')
+        stats = pkt[Dot11ProbeResp].network_stats()
+        # chan = str(stats.get("channel"))
+        enc = str(stats.get("crypto"))
+
+        #Found hidden SSID name!
         if  (pkt.addr3 in hidden_AP_list):
-            #Hidden SSID Found!
-            bssid = str(pkt.addr2)
-            ssid = pkt.info.decode()
-            try:
-                dbm_signal = str(pkt.dBm_AntSignal)
-            except:
-                dbm_signal = "N/A"
-            stats = pkt[Dot11Beacon].network_stats()
-            chan = str(stats.get("channel"))
-            crypto = str(stats.get("crypto") )
-            vendor = find_mac_vendor2(pkt.addr3)
 
-            table_hidden_ssid.add_row(bssid, ssid, dbm_signal, chan, crypto, vendor)
+            vendor =  str(find_mac_vendor2(addr2))
+            build_AP_table(addr2, ssid, dbm_signal, chan, enc, "FINDMYMACLOL")
 
         #An AP is sending a probe for this client
         elif (pkt.addr1 not in clientMACs):
-            client_mac = pkt.addr1
-            clientMACs.append(client_mac)
-            ssid = pkt.info.decode("ascii", errors="ignore")
-            chan = get_channel(pkt[RadioTap].ChannelFrequency)
-            
-            try:
-                dbm_signal = pkt.dBm_AntSignal
-            except:
-                dbm_signal = "N/A"
-            stats = pkt[Dot11ProbeResp].network_stats()
-            crypto = stats.get("crypto") 
-            vendor = str(find_mac_vendor2(client_mac))
-            table_clients_list.add_row(str(client_mac), str(ssid), str(dbm_signal), str(chan), str(crypto), "Resp", str(vendor) )
 
-    elif pkt.haslayer(Dot11Deauth):
-        client_mac = pkt.addr1
-        deauthing_mac = pkt.addr2
-        
-        deauth_packet_list.append(pkt.addr3)
-        table_deauth_packets.add_row(client_mac, deauthing_mac)
+            clientMACs.append(addr1)
+            # ssid = str(pkt.info.decode("ascii", errors="ignore"))
+            vendor = str(find_mac_vendor2(addr1))
+            build_Client_table(addr1, ssid, dbm_signal, chan, enc, "Resp" ,vendor)
 
     elif pkt.haslayer(Dot11ProbeReq):
-        probe_type = "Req"
 
         if pkt.type == 0 and pkt.subtype == 4:
 
-            mac = str(pkt.addr2)
+            probe_type = "Req"
+            # ssid = pkt.info.decode('ascii').strip().strip('\x00')
+
             try:
                 ssid = pkt.info.decode("UTF-8", errors="strict")
             except UnicodeError:
                 pass
-            
             else:
                 #block blank ssid and add your home ap name in list to filter it
                 if not (ssid == ""):
-                    # print(ssid)
+                    clientMACs.append(addr2)
+                    dt = datetime.fromtimestamp(pkt.getlayer(RadioTap).time).strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    if (addr2 not in clientMACs):
+                        vendor = find_mac_vendor2(addr2)
+                        build_Client_table(addr2, ssid, dbm_signal, chan, "N/A", "Req",  vendor)
 
-                    timestamp = pkt.getlayer(RadioTap).time
-                    dt = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-                    rssi = str(pkt[RadioTap].dBm_AntSignal)
-                    #dbm_signal = pkt.dBm_AntSignal
-                    chan = get_channel(pkt[RadioTap].ChannelFrequency)
-                    if (pkt.addr2 not in clientMACs):
-                        #to only show once in UI table
-                        clientMACs.append(mac)
+def sniff_Deauth(pkt):
+    if pkt.haslayer(Dot11Deauth):
+        # client_mac = pkt.addr1
+        # deauthing_mac = pkt.addr2
+        # deauth_packet_list.append(pkt.addr3)
+        # table_deauth_packets.add_row(client_mac, deauthing_mac)
+        pass
 
-                        vendor = str(find_mac_vendor2(mac))
+def parseSSID(pkt):
+    if pkt.haslayer(Dot11):
+        sniff_APs(pkt)
+        sniff_Probes(pkt)
+        sniff_Deauth(pkt)
 
-                        #info = {"timestamp": dt, "mac": mac, "ssid": ssid, "signal_strength": rssi, "channel": chanfreq, "location": "home"}
-                        #print("%s Access Point MAC: %s MADE BY: %s - SSID: %s %s dBm, frequency : %s" % (dt, vendor, mac, ssid, rssi, chanfreq))
+#######################################################################################
+ap_table = [['MAC','SSID', "dBm", "Ch.", "Encryption", "Vendor"]]
+def build_AP_table(bssid, ssid, dbm, ch, enc, ven):
 
-                        table_clients_list.add_row(str(mac), str(ssid), str(rssi), str(chan), "N/A", probe_type, str(vendor))
-        
+    global ap_table
+    ssid = truncate_string(15, ssid)
+    ven = truncate_string(15, ven)
+    enc = truncate_string(12, enc)[2:-2]
+    ap_table.insert(1, [bssid, ssid, dbm, ch, enc, ven])
+
+client_table = [['MAC','SSID', "dBm", "Ch.", "Encryption","Vendor"]]
+def build_Client_table(bssid, ssid, dbm, ch, enc, type, ven):
+    
+    global client_table
+    ssid = truncate_string(15, ssid)
+    ven = truncate_string(15, ven)
+    enc = truncate_string(10, enc)[2:-2]
+    client_table.insert(1, [bssid, ssid, dbm, ch, enc, ven])
+
+def show_AP_table():
+    global ap_table
+    return (tabulate(ap_table, headers='firstrow',   
+    tablefmt='fancy_grid'))
+
+def show_Client_table():
+    global client_table
+    return (tabulate(client_table, headers='firstrow',   
+    tablefmt='fancy_grid')) 
+#######################################################################################
+
 def make_layout() -> Layout:
     """Define the layout."""
     layout = Layout(name="root")
 
     layout.split(
-        Layout(name="header"),
-        Layout(name="footer")
+        Layout(name="header")
+        # Layout(name="footer")
     )
-    layout["header"].ratio = 2
+    layout["header"].ratio = 3
     layout["header"].split_row(
         Layout(name="top-left"),
         Layout(name="top-right")
     )
 
-    layout["footer"].split_row(
-        Layout(name="bottom-left"),
-        Layout(name="bottom-right")
-    )
+    # layout["footer"].split_row(
+    #     Layout(name="bottom-left"),
+    #     Layout(name="bottom-right")
+    # )
     # layout["bottom-left"].split_row(
     #     Layout(name="left-left"),
     #     Layout(name="left-right")
@@ -253,63 +267,15 @@ def make_layout() -> Layout:
 
     return layout
 
-def make_AP_grid() :
-    
-    table_APs.add_column('MAC', justify='right')
-    table_APs.add_column('SSID', justify='right')
-    table_APs.add_column('dBm')
-    table_APs.add_column('Ch.', max_width=3, no_wrap=True, justify='center')
-    table_APs.add_column('Encryption', justify='center', max_width=13, no_wrap=True)
-    table_APs.add_column('Vendor', max_width=15, no_wrap=True)
-
-    return table_APs
-
-def make_clients_grid() :
-    
-    table_clients_list.add_column('MAC', justify='right', max_width=18, no_wrap=True)
-    table_clients_list.add_column('SSID', justify='right')
-    table_clients_list.add_column('dBm')
-    table_clients_list.add_column('Ch.', max_width=3, no_wrap=True, justify='center')
-    table_clients_list.add_column('Encryption', justify='center', max_width=15, no_wrap=True)
-    table_clients_list.add_column('Probe Type', max_width=5, no_wrap=True)
-    table_clients_list.add_column('Vendor', max_width=17, no_wrap=True)
-    
-    return table_clients_list
-
-def make_deauth_grid() :
-    
-    table_deauth_packets.add_column('Target MAC', justify='right')
-    table_deauth_packets.add_column('Culprit AP', justify='right')
-    # table_deauth_packets.add_column('dBm')
-    # table_deauth_packets.add_column('Channel', justify='center')
-    # table_deauth_packets.add_column('Encryption', justify='center')
-    # table_deauth_packets.add_column('Targeted Vendor')
-    # table_deauth_packets.add_column('Culprit AP Vendor')
-
-    return table_deauth_packets
-
-def make_hidden_SSID_grid() :
-    table_hidden_ssid.add_column('MAC', justify='right')
-    table_hidden_ssid.add_column('SSID', justify='right')
-    table_hidden_ssid.add_column('dBm')
-    table_hidden_ssid.add_column('Ch.', max_width=3, justify='center')
-    table_hidden_ssid.add_column('Encryption', justify='center', max_width=15, no_wrap=True)
-    table_hidden_ssid.add_column('Vendor', max_width=20, no_wrap=True)
-
-    return table_hidden_ssid
-
+#UI Thread for Rich library live display
 def create_output_process():
     
     layout = make_layout()
-    layout["top-left"].update(make_AP_grid())
-    layout["top-right"].update(make_clients_grid())
-    layout["bottom-left"].update(make_hidden_SSID_grid())
-    layout["bottom-right"].update(make_deauth_grid())
-
-    with Live(layout, refresh_per_second=10, screen=True) as live:
+    with Live(layout, refresh_per_second=10, screen=True, vertical_overflow="visible") as live:
         while True:
+            layout["top-left"].update(show_AP_table())
+            layout["top-right"].update(show_Client_table())
             time.sleep(1)
-#########################################################################3
 
 if __name__ == "__main__":
     check_root()
@@ -326,7 +292,7 @@ if __name__ == "__main__":
 
     setup_monitor(interface_name)
 
-    time.sleep(4)
+    time.sleep(2)
 
     # Start channel hopping
     hop = Thread(target=channel_hop)
