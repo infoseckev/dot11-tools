@@ -6,6 +6,7 @@ from rich.table import Row, Table
 from rich.console import Console
 from rich.layout import Layout
 from rich.panel import Panel
+from contextlib import closing
 import time
 import os
 import sys
@@ -15,9 +16,12 @@ import csv
 from datetime import datetime
 import pprint
 from tabulate import tabulate
+import sqlite3
 
 console = Console()
 
+LAST_INSERTED_PROBE_RESPONSE = ""
+LAST_INSERTED_PROBE_REQUEST = ""
 hidden_AP_list = []
 visible_AP_list = []
 clientMACs = []
@@ -26,6 +30,9 @@ visibleAPs = []
 deauth_packet_list = []
 interface_name = ""
 
+USER_LOCATION = "home"
+
+DB_WIFI = "wifi.db"
 d = {}
 with open('output.txt') as lookup:
     for line in lookup:
@@ -60,6 +67,7 @@ def check_root():
         print("This script requires sudo privileges")
         exit(1)
 
+#this uses alot of CPU
 def channel_hop():
     #global interface_name
     ch = 1
@@ -67,7 +75,7 @@ def channel_hop():
         os.system(f"iwconfig {interface_name} channel {ch}")
         # switch channel from 1 to 14 each 1s
         ch = ch % 11 + 1
-        time.sleep(0.5)
+        time.sleep(1)
 
 def find_mac_vendor2(mac_addr):
     tmpres = mac_addr.upper().split(":")
@@ -133,7 +141,9 @@ def sniff_APs(pkt):
             stats = pkt[Dot11Beacon].network_stats()
             chan = str(stats.get("channel"))
             enc = str(stats.get("crypto"))
-            
+            vendor =  str(find_mac_vendor2(addr2))
+            utc_time = int(pkt.getlayer(RadioTap).time)
+
             # #SSID is not visible
             if len(ssid) > 0 :
             #     if  (bssid) not in hidden_AP_list:
@@ -146,8 +156,18 @@ def sniff_APs(pkt):
             # else:
                 if (addr2) not in visible_AP_list:
                     visible_AP_list.append(addr2)
-                    vendor =  str(find_mac_vendor2(addr2))
+                    
                     build_AP_table(addr2, ssid, dbm_signal, chan, enc, vendor)
+
+                    with closing(sqlite3.connect(DB_WIFI)) as connection:
+                        with closing(connection.cursor()) as cursor:
+                            
+                            cursor.execute("insert into accessPoints (date_added, mac_address, mac_address_vendor, ssid, signal, longitude, latitude, location, session_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?)", (utc_time, addr2, vendor, ssid, dbm_signal, "gps_lon", "gps_lat", USER_LOCATION, session_id))
+                            connection.commit()
+
+def fingerprint_packet(str1, str2, str3):
+    res = str(str1)+ str(str2) +str( str3)
+    return res
 
 def sniff_Probes(pkt):    
     addr2 = str(pkt.addr2).strip()
@@ -157,47 +177,65 @@ def sniff_Probes(pkt):
     dbm_signal = get_dbm_signal(pkt)
 
     if pkt.haslayer(Dot11ProbeResp):
-
+        utc_time = int(pkt.getlayer(RadioTap).time)
         ssid = pkt.info.decode('ascii').strip().strip('\x00')
         stats = pkt[Dot11ProbeResp].network_stats()
         # chan = str(stats.get("channel"))
         enc = str(stats.get("crypto"))
+        vendor = str(find_mac_vendor2(addr1))
+        vendor_AP = str(find_mac_vendor2(addr3))
+        
+        global LAST_INSERTED_PROBE_RESPONSE
+        if(fingerprint_packet(utc_time, ssid,addr1 ) != LAST_INSERTED_PROBE_RESPONSE):
+        
+            with closing(sqlite3.connect(DB_WIFI)) as connection:
+                with closing(connection.cursor()) as cursor:
+                    cursor.execute("insert into wifiProbeResponses (date_added, client_mac_address, client_mac_address_vendor, ap_mac_address, ap_mac_address_vendor, ssid, signal, longitude, latitude, location, session_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (utc_time, addr1, vendor, addr3, vendor_AP, ssid, dbm_signal,"gps_lon", "gps_lat", "home", session_id))
+                    connection.commit()
+            LAST_INSERTED_PROBE_RESPONSE = fingerprint_packet(utc_time, ssid,addr1 ) 
 
         #Found hidden SSID name!
-        if  (pkt.addr3 in hidden_AP_list):
-
-            vendor =  str(find_mac_vendor2(addr2))
+        if  (addr3 in hidden_AP_list):
             build_AP_table(addr2, ssid, dbm_signal, chan, enc, "FINDMYMACLOL")
-
+            hidden_AP_list.remove(addr3)
+            with closing(sqlite3.connect(DB_WIFI)) as connection:
+                with closing(connection.cursor()) as cursor:
+                    cursor.execute("insert into accessPoints (date_added, mac_address, mac_address_vendor, ssid, signal, longitude, latitude, location, session_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?)", (utc_time, addr2, vendor, ssid, dbm_signal, "gps_lon", "gps_lat", USER_LOCATION, session_id))
+                    connection.commit()
+                    
         #An AP is sending a probe for this client
-        elif (pkt.addr1 not in clientMACs):
-
+        elif (addr1 not in clientMACs):
             clientMACs.append(addr1)
-            # ssid = str(pkt.info.decode("ascii", errors="ignore"))
-            vendor = str(find_mac_vendor2(addr1))
             build_Client_table(addr1, ssid, dbm_signal, chan, enc, "Resp" ,vendor)
-
+            
     elif pkt.haslayer(Dot11ProbeReq):
 
         if pkt.type == 0 and pkt.subtype == 4:
-
             probe_type = "Req"
-            # ssid = pkt.info.decode('ascii').strip().strip('\x00')
-
             try:
                 ssid = pkt.info.decode("UTF-8", errors="strict")
             except UnicodeError:
                 pass
             else:
-                #block blank ssid and add your home ap name in list to filter it
+                # block blank ssid and add your home ap name in list to filter it
                 if not (ssid == ""):
-                    clientMACs.append(addr2)
-                    dt = datetime.fromtimestamp(pkt.getlayer(RadioTap).time).strftime("%Y-%m-%d %H:%M:%S")
+                    utc_time = int(pkt.getlayer(RadioTap).time)
+                    global LAST_INSERTED_PROBE_REQUEST
+                    if(fingerprint_packet(utc_time, ssid,addr1 ) != LAST_INSERTED_PROBE_REQUEST):
                     
-                    if (addr2 not in clientMACs):
+                        #were doing lots more lookups now im inserting in DB 
                         vendor = find_mac_vendor2(addr2)
+                        with closing(sqlite3.connect(DB_WIFI)) as connection:
+                                with closing(connection.cursor()) as cursor:
+                                    cursor.execute("insert into wifiProbeRequests (date_added, mac_address, mac_address_vendor, ssid, signal, location, longitude, latitude, session_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?)", (utc_time, addr2, vendor, ssid, dbm_signal, "gps_lon", "gps_lat", USER_LOCATION, session_id))
+                                    connection.commit()
+                        LAST_INSERTED_PROBE_REQUEST = fingerprint_packet(utc_time, ssid,addr1 ) 
+
+                    if (addr2 not in clientMACs):
+                        clientMACs.append(addr2)
                         build_Client_table(addr2, ssid, dbm_signal, chan, "N/A", "Req",  vendor)
 
+                        
 def sniff_Deauth(pkt):
     if pkt.haslayer(Dot11Deauth):
         # client_mac = pkt.addr1
@@ -211,7 +249,7 @@ def parseSSID(pkt):
         sniff_APs(pkt)
         sniff_Probes(pkt)
         sniff_Deauth(pkt)
-
+        
 #######################################################################################
 ap_table = [['MAC','SSID', "dBm", "Ch.", "Encryption", "Vendor"]]
 def build_AP_table(bssid, ssid, dbm, ch, enc, ven):
@@ -222,14 +260,14 @@ def build_AP_table(bssid, ssid, dbm, ch, enc, ven):
     enc = truncate_string(12, enc)[2:-2]
     ap_table.insert(1, [bssid, ssid, dbm, ch, enc, ven])
 
-client_table = [['MAC','SSID', "dBm", "Ch.", "Encryption","Vendor"]]
+client_table = [['MAC','SSID', "dBm", "Ch.", "Encryption","Type", "Vendor"]]
 def build_Client_table(bssid, ssid, dbm, ch, enc, type, ven):
     
     global client_table
     ssid = truncate_string(15, ssid)
     ven = truncate_string(15, ven)
     enc = truncate_string(10, enc)[2:-2]
-    client_table.insert(1, [bssid, ssid, dbm, ch, enc, ven])
+    client_table.insert(1, [bssid, ssid, dbm, ch, enc, type, ven])
 
 def show_AP_table():
     global ap_table
@@ -278,6 +316,8 @@ def create_output_process():
             time.sleep(1)
 
 if __name__ == "__main__":
+    #get utc  timestamp
+    session_id = datetime.utcnow()
     check_root()
     #TODO: check if db schemas exist
 
@@ -304,7 +344,8 @@ if __name__ == "__main__":
     outputThread.daemon = True
     outputThread.start()
 
-    sniff(iface=interface_name, prn=parseSSID,  store=0, monitor=True)
-
+    filt="wlan type mgt"
+    capture = sniff(iface=interface_name, prn=parseSSID, filter=filt, store=0, monitor=True)
+    
     while True:
         time.sleep(1)
